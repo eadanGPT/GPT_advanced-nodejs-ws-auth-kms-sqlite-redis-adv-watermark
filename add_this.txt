@@ -1,0 +1,179 @@
+Totally—let’s lock this down from a defender’s perspective. Below is a concrete hardening plan tailored to your architecture (unified envelopes, KMS, client worker sandbox, HMAC, metrics, manifest integrity, tamper-evident logs). I’ll focus on realistic attacker goals (piracy, module tampering, key theft, replay, credential sharing) and what you can add without breaking UX.
+
+Threat-driven upgrades
+1) Key & token security
+
+Purpose-bound KMS keys: keep doing purpose='jwt' | 'rpc_envelope' | 'module_sign'. Never reuse a key across purposes; derive per-purpose subkeys if needed.
+
+Stronger client secret handling:
+
+Don’t persist the raw keyHash used for HMAC. Store storage_hash = Argon2id(key, salt_device) (slow KDF) and derive the HMAC key at runtime via hkdf(sha256, keyHash, 'client_mac', info='rpc_v1'). Use different HKDF infos for different functions (HMAC vs local encryption).
+
+Rotate salts per device; if device rebind fails, force re-auth.
+
+Short-lived JWTs + silent refresh: make JWTs 5–15 min; refresh via a server-bound, rotating, device-tied token (revocable).
+
+MFA on risky signals: for new hardware fingerprint, suspicious geo/ASN, impossible travel, or bursty module runs.
+
+2) Envelope authenticity & replay resistance
+
+Strict time window: server rejects envelopes if abs(now - env.ts) > 60s.
+
+Per-user nonce replay cache: SETNX nonce:<user>:<env.nonce> 1 EX 120. If exists → reject.
+
+Clock skew backoff: if too many ts failures from a client, send a “clock sync” error; log metric.
+
+Server-side snippet (conceptual):
+
+const skew = Math.abs(Date.now() - env.ts);
+if (skew > 60_000) return err('bad_ts');
+
+const nonceKey = `nonce:${user}:${env.nonce}`;
+if (!(await redis.set(nonceKey, 1, { NX: true, EX: 120 }))) return err('replay');
+
+if (!verifyHmac(env, ws.meta.keyHash)) return err('bad_hmac');
+
+3) Module integrity & delivery
+
+Signed transparency manifest: sign modules.manifest.json with a long-lived offline key; publish a transparency log (append-only, signed, hash-chained) so clients can prove they fetched a known build.
+
+SRI on module blob: server includes sha256 of module payload; client verifies post-decrypt hash matches manifest entry.
+
+Refuse unsigned updates: the client should refuse any module not present in the signed manifest (even if the server sends it). This prevents a compromised server component from pushing arbitrary code.
+
+4) Client sandbox & anti-tamper (pragmatic)
+
+Strict worker API: (you already have) only sendAndWait(payload) and sendMetrics(obj). No require, fs, or raw ws inside the worker. Pass a frozen ctx.
+
+Runtime integrity pings:
+
+Worker periodically asks the main thread for a server-signed challenge; main thread returns a KMS-signed token the worker can verify (keeps a check loop alive).
+
+If any check fails, worker exits; client reports metric.
+
+Process-hardening hooks (opt-in, platform-dependent):
+
+Detect common debugger flags/envs; add jitter and decoys.
+
+Verify own bundle hash at startup; re-verify after N minutes.
+
+On failure → degrade gracefully (no secrets, no privileged calls), but do not hard-crash (avoid oracle signals for attackers).
+
+5) Rate limiting & abuse controls
+
+Two buckets: one for <module>_run frequency per connection; one per module name per user to stop spamming specific endpoints.
+
+Adaptive limits: reduce limits automatically after repeated failures (bad_hmac, replay, hash_mismatch).
+
+License-aware throttling: lower ceilings for trials, raise for enterprise tenants.
+
+6) Metrics & detection (make it actionable)
+
+Track these with labels {user, module, device, version} where safe:
+
+auth_login_attempts_total{result}
+
+module_load_total, module_run_total, module_run_failures_total{error}
+
+module_exec_seconds_sum|count|min|max|p95 (client-reported + server-side observed when possible)
+
+kms_rotate_total, jwt_issued_total, jwt_refresh_total, jwt_reject_total{reason}
+
+hmac_fail_total, replay_reject_total, ts_skew_reject_total
+
+manifest_mismatch_total, module_integrity_fail_total
+
+rate_limited_total{scope=conn|module}
+
+Add alerts:
+
+Sudden spikes in hmac_fail_total or replay_reject_total.
+
+module_integrity_fail_total > 0
+
+Abnormal module_exec_seconds_max (indicative of attached debuggers or hanging).
+
+7) Tamper-evident RPC log (make it verifiable)
+
+You already chain with prev_hash. Add:
+
+Periodic anchor: every N lines/hour, write the current head hash to a separate file with a KMS signature (or publish to a transparency endpoint).
+
+Segment rotation: roll logs hourly/daily with headHash, segmentId, signedAnchor.
+
+Provide a tiny verifier tool that recomputes chain and verifies anchors with KMS pubkey.
+
+Anchor record:
+
+{
+  "segment": "2025-09-04T12",
+  "head": "<sha256>",
+  "sig": "<base64 KMS sig>",
+  "ts": 1693848000000
+}
+
+8) Device binding & token binding
+
+Bind tokens to device signals (machineId, OS, app version, coarse geo/ASN); store a hashed “device fingerprint” server-side and include its hash in JWT custom claims. Reject if drift too large.
+
+TLS pinning (you already pin server Ed25519; also pin CA chain or enforce a key schedule with rotation).
+
+9) Privacy-aware watermarking
+
+Keep your watermark checks, but add multi-path validation (some checks on client, some on server) so no single bypass “wins.” Mix static + dynamic values (nonce, time) into the watermark HMAC so recordings aren’t replayable.
+
+10) Operational hardening
+
+Kill-switch: a signed server message that disables specific module versions or tenants.
+
+Feature flags: gate risky capabilities under remotely changeable flags (signed, auditable).
+
+SBOM + dependency pinning: lock module build dependencies; sign the SBOM; publish hash in the manifest.
+
+Concrete things to implement next
+A) Replay cache + strict timestamp (server)
+const MAX_SKEW_MS = 60_000;
+async function verifyEnvelope(ws, env) {
+  if (Math.abs(Date.now() - env.ts) > MAX_SKEW_MS) return { ok:false, error:'bad_ts' };
+  const nonceKey = `nonce:${ws.meta.user}:${env.nonce}`;
+  const ok = await redis.set(nonceKey, 1, { NX:true, EX:120 });
+  if (!ok) return { ok:false, error:'replay' };
+  if (!verifyClientHmac(env, ws.meta.keyHash)) return { ok:false, error:'bad_hmac' };
+  return { ok:true };
+}
+
+B) Dual HKDF contexts (client)
+const hmacKey = hkdfSHA256(keyHashHex, 'client_mac', 'rpc_v1');     // for envelope HMAC
+const localKey = hkdfSHA256(keyHashHex, 'local_enc',  'payload_v1'); // local at-rest encryption
+
+C) Worker API freeze (client)
+const ctx = Object.freeze({
+  sendAndWait: payload => postAndWait('callSendAndWait', payload),
+  sendMetrics: payload => post('callSendMetrics', payload),
+});
+
+D) Metrics envelope auth (client & server)
+
+Sign metrics_report envelopes with the same HMAC and verify server-side (prevents spoofed telemetry).
+
+E) Transparency log for manifests
+
+Keep server/modules.manifest.json.
+
+Create server/modules.manifest.sig = KMS signature over the canonical JSON of the manifest.
+
+Client verifies sig using pinned server pubkey before accepting any module updates.
+
+What this buys you
+
+Replays fail (nonce + ts).
+
+Tampering stands out (hash-chained RPC logs + signed anchors).
+
+Stolen modules are less useful (manifest/pin/SRI + worker sandbox + no raw ws).
+
+Key theft is harder (no static secrets, HKDF contexts, Argon2id storage barrier).
+
+Abuse is visible (metrics, rate limits, alerts).
+
+Rapid response (kill-switch, feature flags).

@@ -15,6 +15,59 @@ import { CircuitBreaker } from './lib/circuitBreaker.js';
 import { ModuleRegistry } from './lib/moduleRegistry.js';
 import { TokenService } from './lib/tokenService.js';
 
+// === Unified envelope helpers (added) ===
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { v4 as __uuidv4 } from 'uuid';
+
+function __hdr(typ, ver = process.env.PROTOCOL_VERSION || '1.2') {
+  return { typ, ver, nonce: __uuidv4(), ts: Date.now() };
+}
+function __canon(obj) {
+  return JSON.stringify(obj, Object.keys(obj).sort());
+}
+function __deriveMac(keyHashHex, info = 'rpc_v1') {
+  const ikm = Buffer.from(keyHashHex, 'hex');
+  return crypto.hkdfSync('sha256', ikm, Buffer.from('client_mac'), Buffer.from(info), 32);
+}
+function __verifyClientHmac(envelope, keyHashHex) {
+  if (!envelope?.hmac) return false;
+  const macKey = __deriveMac(keyHashHex);
+  const unsigned = { ...envelope };
+  delete unsigned.hmac; delete unsigned.sig; delete unsigned.kid;
+  const mac = crypto.createHmac('sha256', macKey).update(__canon(unsigned)).digest('base64');
+  try { return crypto.timingSafeEqual(Buffer.from(mac,'utf8'), Buffer.from(envelope.hmac,'utf8')); } catch { return false; }
+}
+
+// Tamper-evident RPC log (hash chain)
+const __rpcLogPath = process.env.RPC_LOG || path.join('server','logs','rpc.log');
+fs.mkdirSync(path.dirname(__rpcLogPath), { recursive: true });
+let __lastLogHash = '0'.repeat(64);
+function __appendRpc(entry) {
+  const line = JSON.stringify({ ...entry, prev: __lastLogHash });
+  __lastLogHash = crypto.createHash('sha256').update(line).digest('hex');
+  fs.appendFileSync(__rpcLogPath, line + '\\n');
+}
+
+// Integrity manifest
+let __manifest = {};
+try {
+  const mpath = process.env.MODULE_MANIFEST || path.join('server','modules.manifest.json');
+  if (fs.existsSync(mpath)) __manifest = JSON.parse(fs.readFileSync(mpath,'utf8'));
+} catch(e){ console.warn('[manifest] load failed', e?.message); }
+
+// Simple per-connection rate limiter for module runs
+const __RL_PER_MIN = parseInt(process.env.MODULE_LOAD_PER_MINUTE || '20', 10);
+function __mkBucket(){ return { count:0, resetAt: Date.now() + 60_000 }; }
+function __canRun(bucket){
+  const now = Date.now();
+  if (now > bucket.resetAt){ bucket.count = 0; bucket.resetAt = now + 60_000; }
+  if (bucket.count >= __RL_PER_MIN) return false;
+  bucket.count += 1; return true;
+}
+
+
 dotenv.config();
 
 const CONFIG = {
@@ -295,7 +348,92 @@ wss.on('connection', async (ws, req) => {
   ws.send(JSON.stringify(hello));
 
   ws.on('message', async (raw) => {
-    let obj; try { obj = JSON.parse(raw.toString('utf8')); } catch { return sendErr('bad_json','Invalid JSON'); }
+    
+    // Unified envelope parse + log
+    let __env;
+    try { __env = JSON.parse(raw.toString()); } catch { return; }
+    __appendRpc({ dir:'in', env: __env });
+
+    // Track login attempts if your auth route is used (keep your existing logic)
+    if (__env?.typ === 'auth' && __env?.method === 'auth_login') {
+      const username = __env?.params?.username || 'unknown';
+      const ok = !!__env?.params?.keyHash; // keep/replace with your real check
+      metrics?.inc?.('auth_login_attempts_total', { username, result: ok ? 'success' : 'failure' });
+      // do not return; let your existing handler continue
+    }
+
+    // Generic <module>_run (server does not execute module; just gate & reply)
+    if (__env?.typ === 'rpc' && typeof __env?.method === 'string' && __env.method.endsWith('_run')) {
+      const moduleName = __env.method.slice(0, -'_run'.length);
+      metrics?.inc?.('module_run_total', { name: moduleName });
+
+      // require bound keyHash (set during successful auth in your existing flow)
+      if (!ws.meta?.keyHash || !__verifyClientHmac(__env, ws.meta.keyHash)) {
+        metrics?.inc?.('module_client_hmac_fail_total', { name: moduleName });
+        const err = { ...__hdr('rpc'), inReplyTo: __env.nonce, error: 'bad_hmac' };
+        // KMS-sign reply if you have helper, else send plain
+        const reply = (typeof keyManager?.signEnvelope === 'function')
+          ? await keyManager.signEnvelope(err, 'rpc_envelope')
+          : err;
+        ws.send(JSON.stringify(reply));
+        __appendRpc({ dir:'out', env: reply });
+        return;
+      }
+
+      // rate-limit per connection
+      if (!__canRun(ws.__bucket)) {
+        metrics?.inc?.('module_rate_limited_total', { name: moduleName });
+        const err = { ...__hdr('rpc'), inReplyTo: __env.nonce, error: 'rate_limited' };
+        const reply = (typeof keyManager?.signEnvelope === 'function')
+          ? await keyManager.signEnvelope(err, 'rpc_envelope')
+          : err;
+        ws.send(JSON.stringify(reply));
+        __appendRpc({ dir:'out', env: reply });
+        return;
+      }
+
+      // integrity manifest check (optional echo path)
+      if (__manifest[moduleName]?.sha256) {
+        metrics?.inc?.('module_manifest_checked_total', { name: moduleName });
+      }
+
+      // Minimal generic reply (server-side assist can be added here)
+      try {
+        const result = { ok: true };
+        const payload = { ...__hdr('rpc'), inReplyTo: __env.nonce, result };
+        const reply = (typeof keyManager?.signEnvelope === 'function')
+          ? await keyManager.signEnvelope(payload, 'rpc_envelope')
+          : payload;
+        ws.send(JSON.stringify(reply));
+        __appendRpc({ dir:'out', env: reply });
+      } catch (e) {
+        metrics?.inc?.('module_run_failures_total', { name: moduleName, error: e?.message || 'error' });
+        const err = { ...__hdr('rpc'), inReplyTo: __env.nonce, error: e?.message || 'error' };
+        const reply = (typeof keyManager?.signEnvelope === 'function')
+          ? await keyManager.signEnvelope(err, 'rpc_envelope')
+          : err;
+        ws.send(JSON.stringify(reply));
+        __appendRpc({ dir:'out', env: reply });
+      }
+      return; // handled
+    }
+
+    // Client-reported metrics (execution time etc.)
+    if (__env?.typ === 'rpc' && __env?.method === 'metrics_report') {
+      const m = __env?.params || {};
+      // expect { module, kind, seconds }
+      if (m.module && m.kind && typeof m.seconds === 'number') {
+        metrics?.observe?.('module_exec_seconds', m.seconds, { name: m.module });
+      }
+      const ok = { ...__hdr('rpc'), inReplyTo: __env.nonce, ok: true };
+      const reply = (typeof keyManager?.signEnvelope === 'function')
+        ? await keyManager.signEnvelope(ok, 'rpc_envelope')
+        : ok;
+      ws.send(JSON.stringify(reply));
+      __appendRpc({ dir:'out', env: reply });
+      return;
+    }
+let obj; try { obj = JSON.parse(raw.toString('utf8')); } catch { return sendErr('bad_json','Invalid JSON'); }
     function sendErr(code,message){ ws.send(JSON.stringify({ msgId: uuidv4(), nonce: uuidv4(), ts: nowMs(), ver: CONFIG.protocolVersion, typ:'error', code, message })); }
 
     try {

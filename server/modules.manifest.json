@@ -1,0 +1,14 @@
+{
+  "analytics": {
+    "sha256": "b610638f581c3376819f5eccfda6d163155d206bb6879cc40be5c51239e80f04"
+  },
+  "mineflayerBot": {
+    "sha256": "511187fa39d3ba436122a43a99be0e1e9bd8b12f2e1b67601b17094b02e7b021"
+  },
+  "pricing": {
+    "sha256": "3656eca46ae857a9b65ef13cde53a252f457389e716b7f9b9513ff9b4e2da70d"
+  },
+  "scoring": {
+    "sha256": "fc6144ee33b65b0e4f7554fb8e30f623cc1650dd801be84089bf7a5fc9e2a557"
+  }
+}

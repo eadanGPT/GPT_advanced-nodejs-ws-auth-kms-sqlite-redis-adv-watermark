@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { WebSocket } from 'ws';
+import { Worker } from 'node:worker_threads';
 import { v4 as uuidv4 } from 'uuid';
 import dotenv from 'dotenv';
 dotenv.config();
@@ -213,7 +214,8 @@ async function verifyServerSig(pinnedSpkiB64, kid, payloadStr, sigB64) {
 }
 
 async function run() {
-  const ws = new WebSocket(CONFIG.url, {
+  let keyHash = globalThis.__KEYHASH || null; // ensure set during auth/login
+const ws = new WebSocket(CONFIG.url, {
     // Do NOT disable verification. Use system CAs plus optional custom CA.
     ca: CONFIG.caPath && fs.existsSync(CONFIG.caPath) ? fs.readFileSync(CONFIG.caPath) : undefined
   });
@@ -428,3 +430,58 @@ run().catch(e=>{ console.error('Client error:', e); process.exit(1); });
     fs.writeFileSync(CONFIG.credsPath, JSON.stringify({ ...cur, ...obj }, null, 2));
   }
   function keyHashFor(key) { return hash(String(key||'')); }
+
+
+// === Unified envelope + client HMAC (added) ===
+function __clientHdr(typ, ver = process.env.PROTOCOL_VERSION || '1.2') {
+  return { typ, ver, nonce: (globalThis.crypto?.randomUUID?.() || require('uuid').v4()), ts: Date.now() };
+}
+function __canon(obj) {
+  return JSON.stringify(obj, Object.keys(obj).sort());
+}
+function __deriveMac(keyHashHex, info = 'rpc_v1') {
+  const ikm = Buffer.from(keyHashHex, 'hex');
+  return crypto.hkdfSync('sha256', ikm, Buffer.from('client_mac'), Buffer.from(info), 32);
+}
+function __signEnvelopeHmac(obj, keyHashHex) {
+  const macKey = __deriveMac(keyHashHex);
+  const unsigned = { ...obj };
+  const hmac = crypto.createHmac('sha256', macKey).update(__canon(unsigned)).digest('base64');
+  return { ...obj, hmac };
+}
+
+
+// === Worker run wrapper for modules (added) ===
+async function __runModuleInWorker(moduleName, modulePath, ws, keyHashHex) {
+  const w = new Worker(new URL('./client.worker.js', import.meta.url), { workerData: { moduleName, modulePath } });
+
+  // Expose ONLY sendAndWait + sendMetrics via main thread, which wraps into HMAC envelope
+  w.on('message', async (msg) => {
+    if (msg.type === 'callSendAndWait') {
+      const env0 = { ...__clientHdr('rpc'), method: `${moduleName}_run`, params: msg.payload };
+      if (!keyHashHex) throw new Error('missing keyHash');
+      const env = __signEnvelopeHmac(env0, keyHashHex);
+      const expect = env.nonce;
+
+      const listener = (data) => {
+        try {
+          const obj = JSON.parse(data.toString());
+          if (obj?.inReplyTo === expect) {
+            ws.off('message', listener);
+            w.postMessage({ type:'resp', resp: obj });
+          }
+        } catch {}
+      };
+      ws.on('message', listener);
+      ws.send(JSON.stringify(env));
+    } else if (msg.type === 'callSendMetrics') {
+      const env0 = { ...__clientHdr('rpc'), method: 'metrics_report', params: msg.payload };
+      const env = keyHashHex ? __signEnvelopeHmac(env0, keyHashHex) : env0;
+      ws.send(JSON.stringify(env));
+    }
+  });
+
+  return new Promise((resolve) => {
+    w.on('message', (m)=>{ if (m.type==='done') resolve(m); });
+  });
+}
