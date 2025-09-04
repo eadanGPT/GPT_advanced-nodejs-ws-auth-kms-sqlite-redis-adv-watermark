@@ -1,0 +1,24 @@
+{
+  "name": "advanced-ws-auth-system-pro",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "server": "node server/index.js",
+    "compile:modules": "node server/scripts/compile-modules.js",
+    "client": "node client.single.js",
+    "init:db": "node server/scripts/init-db.js"
+  },
+  "dependencies": {
+    "ajv": "^8.17.1",
+    "ajv-formats": "^3.0.1",
+    "bytenode": "^1.5.6",
+    "dotenv": "^16.4.5",
+    "ioredis": "^5.4.1",
+    "jose": "^5.9.6",
+    "lru-cache": "^10.4.3",
+    "uuid": "^9.0.1",
+    "ws": "^8.18.0",
+    "better-sqlite3": "^11.7.0"
+  }
+}
