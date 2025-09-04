@@ -1,0 +1,669 @@
+import fs from 'fs';
+import path from 'path';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import fs from 'fs';
+import path from 'path';
+import crypto from 'node:crypto';
+import path from 'node:path';
+import fs from 'fs';
+import path from 'path';
+import crypto from 'node:crypto';
+import crypto from 'node:crypto';
+import fs from 'fs';
+import path from 'path';
+import crypto from 'node:crypto';
+import https from 'node:https';
+import fs from 'fs';
+import path from 'path';
+import crypto from 'node:crypto';
+import http2 from 'node:http2';
+import fs from 'fs';
+import path from 'path';
+import crypto from 'node:crypto';
+import { WebSocketServer } from 'ws';
+import fs from 'fs';
+import path from 'path';
+import crypto from 'node:crypto';
+import { v4 as uuidv4 } from 'uuid';
+import fs from 'fs';
+import path from 'path';
+import crypto from 'node:crypto';
+import Ajv from 'ajv';
+import fs from 'fs';
+import path from 'path';
+import crypto from 'node:crypto';
+import addFormats from 'ajv-formats';
+import fs from 'fs';
+import path from 'path';
+import crypto from 'node:crypto';
+import dotenv from 'dotenv';
+import fs from 'fs';
+import path from 'path';
+import crypto from 'node:crypto';
+import { KeyManager } from './lib/keyManager.js';
+import fs from 'fs';
+import path from 'path';
+import crypto from 'node:crypto';
+import { LicenseStore } from './lib/licenseStore.js';
+import fs from 'fs';
+import path from 'path';
+import crypto from 'node:crypto';
+import { RateLimiter } from './lib/rateLimiter.js';
+import fs from 'fs';
+import path from 'path';
+import crypto from 'node:crypto';
+import { CircuitBreaker } from './lib/circuitBreaker.js';
+import fs from 'fs';
+import path from 'path';
+import crypto from 'node:crypto';
+import { ModuleRegistry } from './lib/moduleRegistry.js';
+import fs from 'fs';
+import path from 'path';
+import crypto from 'node:crypto';
+import { TokenService } from './lib/tokenService.js';
+
+// === Unified envelope helpers (added) ===
+import fs from 'fs';
+import path from 'path';
+import crypto from 'node:crypto';
+import crypto from 'node:crypto';
+import fs from 'fs';
+import path from 'path';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import fs from 'fs';
+import path from 'path';
+import crypto from 'node:crypto';
+import path from 'node:path';
+import fs from 'fs';
+import path from 'path';
+import crypto from 'node:crypto';
+import { v4 as __uuidv4 } from 'uuid';
+
+function __hdr(typ, ver = process.env.PROTOCOL_VERSION || '1.2') {
+  return { typ, ver, nonce: __uuidv4(), ts: Date.now() };
+}
+function __canon(obj) {
+  return JSON.stringify(obj, Object.keys(obj).sort());
+}
+function __deriveMac(keyHashHex, info = 'rpc_v1') {
+  const ikm = Buffer.from(keyHashHex, 'hex');
+  return crypto.hkdfSync('sha256', ikm, Buffer.from('client_mac'), Buffer.from(info), 32);
+}
+function __verifyClientHmac(envelope, keyHashHex) {
+  if (!envelope?.hmac) return false;
+  const macKey = __deriveMac(keyHashHex);
+  const unsigned = { ...envelope };
+  delete unsigned.hmac; delete unsigned.sig; delete unsigned.kid;
+  const mac = crypto.createHmac('sha256', macKey).update(__canon(unsigned)).digest('base64');
+  
+// === Manifest & Client Hash RPC helpers (added) ===
+function __loadManifest() {
+  try {
+    const mpath = process.env.MODULE_MANIFEST || path.join('server', 'modules.manifest.json');
+    return JSON.parse(fs.readFileSync(mpath, 'utf8'));
+  } catch (e) { return null; }
+}
+
+function __signCanonWithEnvKey(canon) {
+  try {
+    const privB64 = process.env.SERVER_SIGN_PRIVATE_B64;
+    if (!privB64) return null;
+    const privateKey = Buffer.from(privB64, 'base64');
+    // Expect an Ed25519 private key in PKCS8 (DER) form, base64-encoded
+    const sig = crypto.sign(null, Buffer.from(canon), { key: privateKey, format:'der', type:'pkcs8' });
+    return sig.toString('base64');
+  } catch (e) { return null; }
+}
+
+try { return crypto.timingSafeEqual(Buffer.from(mac,'utf8'), Buffer.from(envelope.hmac,'utf8')); } catch { return false; }
+}
+
+// Tamper-evident RPC log (hash chain)
+const __rpcLogPath = process.env.RPC_LOG || path.join('server','logs','rpc.log');
+fs.mkdirSync(path.dirname(__rpcLogPath), { recursive: true });
+let __lastLogHash = '0'.repeat(64);
+function __appendRpc(entry) {
+  const line = JSON.stringify({ ...entry, prev: __lastLogHash });
+  __lastLogHash = crypto.createHash('sha256').update(line).digest('hex');
+  fs.appendFileSync(__rpcLogPath, line + '\\n');
+}
+
+// Integrity manifest
+let __manifest = {};
+try {
+  const mpath = process.env.MODULE_MANIFEST || path.join('server','modules.manifest.json');
+  if (fs.existsSync(mpath)) __manifest = JSON.parse(fs.readFileSync(mpath,'utf8'));
+} catch(e){ console.warn('[manifest] load failed', e?.message); }
+
+// Simple per-connection rate limiter for module runs
+const __RL_PER_MIN = parseInt(process.env.MODULE_LOAD_PER_MINUTE || '20', 10);
+function __mkBucket(){ return { count:0, resetAt: Date.now() + 60_000 }; }
+function __canRun(bucket){
+  const now = Date.now();
+  if (now > bucket.resetAt){ bucket.count = 0; bucket.resetAt = now + 60_000; }
+  if (bucket.count >= __RL_PER_MIN) return false;
+  bucket.count += 1; return true;
+}
+
+
+dotenv.config();
+
+const CONFIG = {
+  host: process.env.HOST || '127.0.0.1',
+  port: Number(process.env.PORT || 8443),
+  protocolVersion: '1.1',
+  skewMs: 60_000,
+  msgSizeCap: 64 * 1024,
+  rotateHintSec: 600,
+  moduleBindMaxMs: 60_000,
+};
+
+/* string packer start */
+
+function mulberry32(seed) {
+  return function() {
+    let t = seed += 0x6D2B79F5;
+    t = Math.imul(t ^ t >>> 15, t | 1);
+    t ^= t + Math.imul(t ^ t >>> 7, t | 61);
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+function choice(rng, arr) {
+  return arr[Math.floor(rng() * arr.length)];
+}
+function randBool(rng, p = 0.5) {
+  return rng() < p;
+}
+function randInt(rng, min, max) {
+  return Math.floor(rng() * (max - min + 1)) + min;
+}
+
+// ---------- Safe Eval ----------
+function safeEval(expr) {
+  try {
+    // eslint-disable-next-line no-new-func
+    return Function(`"use strict"; return (${expr});`)();
+  } catch {
+    return Symbol("BAD");
+  }
+}
+
+// ---------- Wrapper Checker ----------
+function wrapChecked(expr, rng, target) {
+  const candidates = [
+    e => `+( ${e} )`,
+    e => `((${e}) ^ 0)`,
+    e => `((()=>(${e}))())`,
+    e => `(!![] ? ${e} : ${e})`,
+    e => `(0, ${e})`,
+    e => `(~[] + 1 ? ${e} : ${e})`,
+    e => `(function(){ return ${e}; })()`
+  ];
+
+  for (const wrap of candidates) {
+    if (randBool(rng, 0.3)) {
+      const candidate = wrap(expr);
+      const val = safeEval(`(${candidate})|0`);
+      if (val === target) expr = candidate;
+    }
+  }
+  return expr;
+}
+
+// ---------- Schema Wrapper ----------
+function wrapSchema(fn) {
+  return (n, rng, depth = 0, maxDepth = 3) => {
+    const expr = fn(n, rng, depth, maxDepth);
+    if (!expr) return null;
+    const val = safeEval(`(${expr})|0`);
+    return val === n ? expr : null;
+  };
+}
+
+// ---------- Schemas ----------
+function schema_addSub(n, rng, depth, maxDepth) {
+  const a = randInt(rng, -0x7fffffff, 0x7fffffff);
+  const b = n - a;
+  return `${emitSub(a, rng, depth, maxDepth)} + ${emitSub(b, rng, depth, maxDepth)}`;
+}
+
+function schema_xorCancel(n, rng, depth, maxDepth) {
+  const mask = randInt(rng, -0x7fffffff, 0x7fffffff);
+  const part = n ^ mask;
+  return `(${emitSub(part, rng, depth, maxDepth)} ^ ${emitSub(mask, rng, depth, maxDepth)})`;
+}
+
+function schema_pow2Offset(n, rng, depth, maxDepth) {
+  const p = Math.max(1, Math.floor(Math.log2(Math.max(2, Math.abs(n)))));
+  const base = 1 << p;
+  const off = n - base;
+  return `${emitSub(base, rng, depth, maxDepth)} + ${emitSub(off, rng, depth, maxDepth)}`;
+}
+
+function schema_bitmaskSplit(n, rng, depth, maxDepth) {
+  const hi = n & 0xffff0000;
+  const lo = n & 0x0000ffff;
+  return `${emitSub(hi, rng, depth, maxDepth)} | ${emitSub(lo, rng, depth, maxDepth)}`;
+}
+
+function schema_nybbleRecompose(n, rng, depth, maxDepth) {
+  const parts = [];
+  for (let i = 0; i < 8; i++) {
+    const nibble = (n >> (i * 4)) & 0xf;
+    parts.push(`${emitSub(nibble, rng, depth, maxDepth)} << ${i * 4}`);
+  }
+  return parts.join(" | ");
+}
+
+function schema_rotateLike(n, rng, depth, maxDepth) {
+  const shift = randInt(rng, 1, 31);
+  const expr = `((${emitSub(n >>> shift, rng, depth, maxDepth)}) << ${shift}) | ${n & ((1 << shift) - 1)}`;
+  return expr;
+}
+
+function schema_parseIntRadix(n, rng, depth, maxDepth) {
+  const radix = randInt(rng, 2, 36);
+  const str = Math.abs(n).toString(radix);
+  const baseExpr = `parseInt("${str}", ${radix})`;
+  return n < 0 ? `-${baseExpr}` : baseExpr;
+}
+
+// ---------- Recursive Helper ----------
+function emitSub(n, rng, depth, maxDepth) {
+  if (depth >= maxDepth) return `${n}`;
+  return emitNumber(n, rng, depth + 1, maxDepth);
+}
+
+// ---------- Emitter Core ----------
+function emitNumber(n, rng, depth = 0, maxDepth = 8) {
+  const schemas = [
+    wrapSchema(schema_addSub),
+    wrapSchema(schema_xorCancel),
+    wrapSchema(schema_pow2Offset),
+    wrapSchema(schema_bitmaskSplit),
+    wrapSchema(schema_nybbleRecompose),
+    wrapSchema(schema_rotateLike),
+    wrapSchema(schema_parseIntRadix)
+  ];
+
+  // randomly shuffle schema order
+  const pool = schemas.slice().sort(() => rng() - 0.5);
+
+  while (pool.length) {
+    const schema = pool.pop();
+    const expr = schema(n, rng, depth, maxDepth);
+    if (expr != null) {
+      let wrapped = wrapChecked(expr, rng, n);
+      wrapped = `((${wrapped})|0)`;
+      if (safeEval(wrapped) === n) {
+        return wrapped;
+      }
+    }
+  }
+  throw new Error("No valid schema found for " + n);
+}
+
+
+// ---------- Validator ----------
+function validate(n, rng) {
+  const expr = emitNumber(n, rng);
+  const val = safeEval(expr);
+  if (val !== n) {
+    return validate(n, rng())
+  }
+  return expr;
+}
+
+function packString( str) {
+	let newStr = "(()=>{ return [";
+	for (let i = 0; i < str.length; i++){
+		newStr += validate(str.charCodeAt(i), mulberry32(Math.random()%10000000000|0))+","
+	};
+	newStr+= "].map(s=>String.fromCharCode(s)).join('');})()";
+	return newStr;
+}
+
+/* String packer end */
+
+function canonical(obj) {
+  const sort = (v) => {
+    if (Array.isArray(v)) return v.map(sort);
+    if (v && typeof v === 'object' && v.constructor === Object) {
+      return Object.keys(v).sort().reduce((acc, k) => { acc[k]=sort(v[k]); return acc; }, {});
+    }
+    return v;
+  };
+  return JSON.stringify(sort(obj));
+}
+const nowMs = () => Date.now();
+const b64 = (b) => Buffer.from(b).toString('base64');
+const b64ToBuf = (s) => Buffer.from(s, 'base64');
+const assert = (c,m='Assertion failed') => { if(!c) throw new Error(m); };
+
+// ---- Audit log ----
+const AUDIT_LOG_PATH = path.resolve('server/audit.log');
+let lastAuditHashHex = '';
+if (fs.existsSync(AUDIT_LOG_PATH)) {
+  const lines = fs.readFileSync(AUDIT_LOG_PATH,'utf8').trim().split(/\r?\n/);
+  const last = lines.at(-1);
+  if (last) lastAuditHashHex = JSON.parse(last).hash;
+}
+function auditAppend(record) {
+  const base = { ts: new Date().toISOString(), ...record };
+  const prev = lastAuditHashHex;
+  const h = crypto.createHash('sha256');
+  h.update(prev + canonical(base));
+  const hash = h.digest('hex');
+  lastAuditHashHex = hash;
+  fs.appendFileSync(AUDIT_LOG_PATH, JSON.stringify({ ...base, prev, hash }) + '\n', 'utf8');
+}
+
+// ---- TLS servers ----
+const tls = {
+  key: fs.readFileSync(process.env.TLS_KEY || 'certs/server.key'),
+  cert: fs.readFileSync(process.env.TLS_CERT || 'certs/server.crt'),
+  allowHTTP1: true,
+  honorCipherOrder: true,
+  minVersion: 'TLSv1.3',
+};
+const h2 = http2.createSecureServer(tls);
+const httpsServer = https.createServer(tls, (req, res) => {
+  res.setHeader('Strict-Transport-Security','max-age=63072000; includeSubDomains; preload');
+  res.writeHead(200);
+  if (req.url === '/metrics') { try { const m = keyManager.metrics; res.writeHead(200, {'Content-Type':'text/plain'}); res.end(`kms_sign_count ${m.kms_sign_count}\n`+`kms_rotate_count ${m.kms_rotate_count}\n`); } catch { res.writeHead(500); res.end('metrics_error'); } return; } res.end('WS Auth Pro server online\n');
+});
+
+setInterval(()=>{ try { keyManager.rotateIfNeeded && keyManager.rotateIfNeeded(); } catch(e){} }, 60_000);
+httpsServer.listen(CONFIG.port, CONFIG.host, ()=>{
+  console.log(`HTTPS/WSS on wss://${CONFIG.host}:${CONFIG.port}`);
+});
+
+const wss = new WebSocketServer({ server: httpsServer, maxPayload: CONFIG.msgSizeCap });
+
+// ---- Schemas ----
+const ajv = new Ajv({ strict: true, removeAdditional:'failing', allErrors: true });
+addFormats(ajv);
+const Header = {
+  type:'object', required:['msgId','nonce','ts','typ','ver'],
+  properties:{ msgId:{type:'string'}, nonce:{type:'string'}, ts:{type:'integer'}, typ:{type:'string'}, ver:{const:CONFIG.protocolVersion} },
+  additionalProperties:true
+};
+const LoginReqSchema = { allOf:[ Header, { type:'object', required:['username','password','deviceInfo'],
+  properties:{ typ:{const:'login'}, username:{type:'string'}, password:{type:'string'},
+    deviceInfo:{ type:'object', required:['os','arch','appVer','hwHash'], additionalProperties:false,
+      properties:{ os:{type:'string'}, arch:{type:'string'}, appVer:{type:'string'}, hwHash:{type:'string'} } } } } ] };
+const ActivateReqSchema = { allOf:[ Header, { type:'object', required:['licenseKey','machineId','token'],
+  properties:{ typ:{const:'activate'}, licenseKey:{type:'string'}, machineId:{type:'string'}, token:{type:'string'} } } ] };
+const RpcReqSchema = { allOf:[ Header, { type:'object', required:['token','method'], properties:{ typ:{const:'rpc'}, token:{type:'string'}, method:{type:'string'}, params:{} } } ] };
+const GetModuleReqSchema = { allOf:[ Header, { type:'object', required:['token','clientPubX25519Pem','bind','moduleId'],
+  properties:{ typ:{const:'get_module'}, token:{type:'string'}, clientPubX25519Pem:{type:'string'}, moduleId:{type:'string'},
+    bind:{ type:'object', required:['exp','watermark'], additionalProperties:false, properties:{ exp:{type:'integer'}, watermark:{type:'string'} } } } } ] };
+
+const validate = {
+  login: ajv.compile(LoginReqSchema),
+  activate: ajv.compile(ActivateReqSchema),
+  rpc: ajv.compile(RpcReqSchema),
+  getModule: ajv.compile(GetModuleReqSchema),
+};
+
+// ---- Services ----
+const keyManager = await KeyManager.init();
+const licenseStore = await LicenseStore.init();
+const rateLimiter = await RateLimiter.init();
+const breaker = CircuitBreaker.create();
+const tokenService = TokenService.create(keyManager);
+
+// ---- WS ----
+wss.on('connection', async (ws, req) => {
+  const ip = req.socket.remoteAddress;
+  const hello = {
+    typ:'hello', ver:CONFIG.protocolVersion, ts: nowMs(),
+    ed25519PublicKeyB64: await keyManager.getActivePublicSPKIb64(),
+    modules: ModuleRegistry.listModules(),
+    proto:'1.1'
+  };
+  ws.send(JSON.stringify(hello));
+
+  ws.on('message', async (raw) => {
+    
+    // Unified envelope parse + log
+    let __env;
+    try { __env = JSON.parse(raw.toString()); } catch { return; }
+    __appendRpc({ dir:'in', env: __env });
+
+    // Track login attempts if your auth route is used (keep your existing logic)
+    if (__env?.typ === 'auth' && __env?.method === 'auth_login') {
+      const username = __env?.params?.username || 'unknown';
+      const ok = !!__env?.params?.keyHash; // keep/replace with your real check
+      metrics?.inc?.('auth_login_attempts_total', { username, result: ok ? 'success' : 'failure' });
+      // do not return; let your existing handler continue
+    }
+
+    // Generic <module>_run (server does not execute module; just gate & reply)
+    if (__env?.typ === 'rpc' && typeof __env?.method === 'string' && __env.method.endsWith('_run')) {
+      const moduleName = __env.method.slice(0, -'_run'.length);
+      metrics?.inc?.('module_run_total', { name: moduleName });
+
+      // require bound keyHash (set during successful auth in your existing flow)
+      if (!ws.meta?.keyHash || !__verifyClientHmac(__env, ws.meta.keyHash)) {
+        metrics?.inc?.('module_client_hmac_fail_total', { name: moduleName });
+        const err = { ...__hdr('rpc'), inReplyTo: __env.nonce, error: 'bad_hmac' };
+        // KMS-sign reply if you have helper, else send plain
+        const reply = (typeof keyManager?.signEnvelope === 'function')
+          ? await keyManager.signEnvelope(err, 'rpc_envelope')
+          : err;
+        ws.send(JSON.stringify(reply));
+        __appendRpc({ dir:'out', env: reply });
+        return;
+      }
+
+      // rate-limit per connection
+      if (!__canRun(ws.__bucket)) {
+        metrics?.inc?.('module_rate_limited_total', { name: moduleName });
+        const err = { ...__hdr('rpc'), inReplyTo: __env.nonce, error: 'rate_limited' };
+        const reply = (typeof keyManager?.signEnvelope === 'function')
+          ? await keyManager.signEnvelope(err, 'rpc_envelope')
+          : err;
+        ws.send(JSON.stringify(reply));
+        __appendRpc({ dir:'out', env: reply });
+        return;
+      }
+
+      // integrity manifest check (optional echo path)
+      if (__manifest[moduleName]?.sha256) {
+        metrics?.inc?.('module_manifest_checked_total', { name: moduleName });
+      }
+
+      // Minimal generic reply (server-side assist can be added here)
+      try {
+        const result = { ok: true };
+        const payload = { ...__hdr('rpc'), inReplyTo: __env.nonce, result };
+        const reply = (typeof keyManager?.signEnvelope === 'function')
+          ? await keyManager.signEnvelope(payload, 'rpc_envelope')
+          : payload;
+        ws.send(JSON.stringify(reply));
+        __appendRpc({ dir:'out', env: reply });
+      } catch (e) {
+        metrics?.inc?.('module_run_failures_total', { name: moduleName, error: e?.message || 'error' });
+        const err = { ...__hdr('rpc'), inReplyTo: __env.nonce, error: e?.message || 'error' };
+        const reply = (typeof keyManager?.signEnvelope === 'function')
+          ? await keyManager.signEnvelope(err, 'rpc_envelope')
+          : err;
+        ws.send(JSON.stringify(reply));
+        __appendRpc({ dir:'out', env: reply });
+      }
+      return; // handled
+    }
+
+    // Client-reported metrics (execution time etc.)
+    if (__env?.typ === 'rpc' && __env?.method === 'metrics_report') {
+      const m = __env?.params || {};
+      // expect { module, kind, seconds }
+      if (m.module && m.kind && typeof m.seconds === 'number') {
+        metrics?.observe?.('module_exec_seconds', m.seconds, { name: m.module });
+      }
+      const ok = { ...__hdr('rpc'), inReplyTo: __env.nonce, ok: true };
+      const reply = (typeof keyManager?.signEnvelope === 'function')
+        ? await keyManager.signEnvelope(ok, 'rpc_envelope')
+        : ok;
+      ws.send(JSON.stringify(reply));
+      __appendRpc({ dir:'out', env: reply });
+      return;
+
+    // --- RPC: get_manifest (signed, if env key provided) ---
+    if (__env?.typ === 'rpc' && __env?.method === 'get_manifest') {
+      const manifest = __loadManifest();
+      const canon = manifest ? JSON.stringify(manifest, Object.keys(manifest).sort()) : '';
+      const sig = manifest ? __signCanonWithEnvKey(canon) : null;
+      const reply = { ...__hdr('rpc'), inReplyTo: __env.nonce, result: { manifest, sig } };
+      ws.send(JSON.stringify(reply));
+      __appendRpc({ dir:'out', env: reply });
+      await __maybeAnchor?.(keyManager);
+      return;
+    }
+
+    // --- RPC: get_client_hash ---
+    if (__env?.typ === 'rpc' && __env?.method === 'get_client_hash') {
+      let clientHash = null;
+      try {
+        const hp = path.join('server', 'client.hash');
+        clientHash = fs.readFileSync(hp, 'utf8').trim();
+      } catch {}
+      const reply = { ...__hdr('rpc'), inReplyTo: __env.nonce, result: { clientHash } };
+      ws.send(JSON.stringify(reply));
+      __appendRpc({ dir:'out', env: reply });
+      await __maybeAnchor?.(keyManager);
+      return;
+    }
+    }
+let obj; try { obj = JSON.parse(raw.toString('utf8')); } catch { return sendErr('bad_json','Invalid JSON'); }
+    function sendErr(code,message){ ws.send(JSON.stringify({ msgId: uuidv4(), nonce: uuidv4(), ts: nowMs(), ver: CONFIG.protocolVersion, typ:'error', code, message })); }
+
+    try {
+      if (raw.length > CONFIG.msgSizeCap) return sendErr('too_large','Message too large');
+      assert(obj.ver === CONFIG.protocolVersion, 'Bad protocol version');
+
+      // rate limit by IP pre-check (lightweight)
+      await rateLimiter.allow(`ip:${ip}`, 1);
+
+      switch (obj.typ) {
+
+        case 'login': {
+          if (!validate.login(obj)) throw new Error('Schema validation failed (login)');
+          const key = `act:${ip}:${obj.username}`;
+          if (breaker.blocked(key)) throw new Error('Temporarily blocked, try later');
+
+          try {
+            const user = licenseStore.checkPassword(obj.username, obj.password);
+            const tok = await tokenService.issueLogin(user.id, obj.deviceInfo);
+            auditAppend({ actor: obj.username, action:'login_ok' });
+            const res = { msgId: uuidv4(), nonce: obj.nonce, ts: nowMs(), ver: CONFIG.protocolVersion, typ:'login_ok',
+              token: tok, rotateAfter: 900, licenses: licenseStore.listUserLicenses(user.id) };
+            ws.send(JSON.stringify(res));
+          } catch (e) {
+            breaker.fail(key);
+            throw e;
+          }
+          break;
+        }
+
+        case 'activate': {
+          if (!validate.activate(obj)) throw new Error('Schema validation failed (activate)');
+          const { payload } = await tokenService.verifyLogin(obj.token);
+          // license must belong to user
+          licenseStore.checkLicenseForUser(obj.licenseKey, payload.sub);
+          // rate limit by compound
+          await rateLimiter.allow(`ip:${ip}:lic:${obj.licenseKey}`, 1);
+          const tok = await tokenService.issueLicense(obj.licenseKey, obj.machineId);
+          auditAppend({ actor: obj.licenseKey, action:'activate', meta:{ user: payload.sub, machineId: obj.machineId } });
+          const res = { msgId: uuidv4(), nonce: obj.nonce, ts: nowMs(), ver: CONFIG.protocolVersion, typ:'activated',
+            token: tok, exp: Math.floor(Date.now()/1000)+15*60,
+            ed25519PublicKeyB64: await keyManager.getActivePublicSPKIb64(), rotateAfter: 600 };
+          ws.send(JSON.stringify(res));
+          break;
+        }
+
+        case 'rpc': {
+          if (!validate.rpc(obj)) throw new Error('Schema validation failed (rpc)');
+          const { payload } = await tokenService.verifyLicense(obj.token);
+          await rateLimiter.allow(`ip:${ip}:lic:${payload.sub}`, 1);
+          assert(payload.scopes?.includes('rpc:invoke'), 'Missing scope rpc:invoke');
+          const result = ModuleRegistry.dispatchRpc(obj.method, obj.params);
+          const response = { msgId: uuidv4(), nonce: obj.nonce, ts: nowMs(), ver: CONFIG.protocolVersion, typ:'rpc_result', result };
+          const pay = canonical({ method: obj.method, result, nonce: response.nonce, ts: response.ts });
+          const sig = await keyManager.sign(Buffer.from(pay,'utf8'),'rpc_envelope');
+          response.sigB64 = Buffer.from(sig).toString('base64');
+          response.kid = (await keyManager.getActive()).kid;
+          auditAppend({ actor: payload.sub, action:'rpc', meta:{ method: obj.method } });
+          ws.send(JSON.stringify(response));
+          break;
+        }
+
+        case 'get_module': {
+          if (!validate.getModule(obj)) throw new Error('Schema validation failed (get_module)');
+          const { payload } = await tokenService.verifyLicense(obj.token);
+          await rateLimiter.allow(`ip:${ip}:lic:${payload.sub}`, 1);
+          assert(payload.scopes?.includes('module:get:'+obj.moduleId) || payload.scopes?.includes('module:get'), 'Missing scope');
+          assert(obj.bind.exp > nowMs(), 'bind.exp must be future');
+          assert(obj.bind.exp - nowMs() <= CONFIG.moduleBindMaxMs, 'bind window too large');
+
+          // ephemeral X25519
+          const { privateKey: serverPriv, publicKey: serverPub } = crypto.generateKeyPairSync('x25519');
+          const serverPubPem = serverPub.export({ type:'spki', format:'pem' });
+
+          const bytes = ModuleRegistry.loadCompiled(obj.moduleId); // .jsc or .node bytes
+          const watermark = `sub:${payload.sub}|machine:${payload.machineId||'na'}|nonce:${obj.nonce}`;
+          const wmSalt = crypto.randomBytes(16).toString('base64');
+
+          // Advanced watermark prelude: include hashes and signed block
+          const wmBlock = JSON.stringify({ watermark, exp: obj.bind.exp, nonce: obj.nonce });
+          const wmHash = crypto.createHash('sha256').update(`${watermark}|${obj.bind.exp}|${obj.nonce}`).digest('hex');
+          const modHash = crypto.createHash('sha256').update(bytes).digest('hex');
+          const wmSigRaw = await keyManager.sign(Buffer.from(wmBlock,'utf8'));
+          const wmSigB64 = Buffer.from(wmSigRaw).toString('base64');
+          const prelude = Buffer.from(
+            packString([
+              `/*wmHash:${wmHash}*/`,
+              `/*wmSigB64:${wmSigB64}*/`,
+              `/*wmBlock:${wmBlock}*/`,
+              `/*modHash:${modHash}*/`,
+              `/*watermark:${watermark};exp:${obj.bind.exp};nonce:${obj.nonce}*/`,
+              `/*wm_salt:${wmSalt}*/`,
+              `/*wm_hmac:${wmInner}*/`,
+              `/*__WM_END__*/`
+            ].join('\n') + '\n'),
+          'utf8');
+          const boundBytes = Buffer.concat([prelude, bytes]);
+
+          const secret = crypto.diffieHellman({ privateKey: serverPriv, publicKey: crypto.createPublicKey(obj.clientPubX25519Pem) });
+          const key = crypto.hkdfSync('sha256', secret, Buffer.from('mod_v2'), Buffer.alloc(0), 32);
+          const iv = crypto.randomBytes(12);
+          const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+          const ct = Buffer.concat([cipher.update(boundBytes), cipher.final()]);
+          const tag = cipher.getAuthTag();
+          const enc = { iv: b64(iv), ciphertext: b64(Buffer.concat([ct, tag])) };
+
+          const { kid } = await keyManager.getActive();
+          const payloadSig = JSON.stringify({ enc, bind: obj.bind, serverPubX25519: serverPubPem }, Object.keys({enc:1, bind:1, serverPubX25519:1}).sort());
+          const envSig = await keyManager.sign(Buffer.from(payloadSig,'utf8'));
+
+          const res = { msgId: uuidv4(), nonce: obj.nonce, ts: nowMs(), ver: CONFIG.protocolVersion, typ:'module',
+            moduleId: obj.moduleId, enc, envSigB64: Buffer.from(envSig).toString('base64'),
+            serverKeys: { pubX25519Pem: serverPubPem, kid, ed25519PublicKeyB64: await keyManager.getActivePublicSPKIb64() } };
+          auditAppend({ actor: payload.sub, action:'module_delivered', meta:{ module: obj.moduleId } });
+          ws.send(JSON.stringify(res));
+          break;
+        }
+
+        default:
+          return sendErr('bad_type','Unsupported typ');
+      }
+
+    } catch (e) {
+      ws.send(JSON.stringify({ msgId: uuidv4(), nonce: uuidv4(), ts: nowMs(), ver: CONFIG.protocolVersion, typ:'error', code:'bad_request', message: e.message }));
+    }
+  });
+});
