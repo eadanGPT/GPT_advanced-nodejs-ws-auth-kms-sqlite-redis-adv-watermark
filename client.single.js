@@ -231,6 +231,8 @@ async function run() {
       PinStore.ensurePinned(msg.ed25519PublicKeyB64);
       pinned = msg.ed25519PublicKeyB64;
       modules = msg.modules || [];
+      // optional register
+      await registerIfNeeded(ws);
       // login
       await ensureLogin(ws);
       // choose a license and activate
@@ -248,7 +250,7 @@ async function run() {
       const loaded = await import(pathToFileURL(encPath).href);
       //console.log('[module loaded] keys:', Object.keys(loaded));
 	  try {
-		  await loaded.run( ws);
+		  await loaded.run( sendAndWait, { userId: (loadCreds().userId||null), username: (loadCreds().username||CONFIG.username), machineId: CONFIG.machineId, licenseKey: process.env.LICENSE_KEY||null });
 	  } catch (err){
 		  throw new Error(err);
 		  process.exit(1);
@@ -277,13 +279,43 @@ async function run() {
 
   async function ensureLogin(ws) {
     if (loginTok) return;
-    const msg = { ...header('login'), username: CONFIG.username, password: CONFIG.password, deviceInfo:{
+    // Try saved token
+    let savedTok; try { savedTok = fs.readFileSync(CONFIG.tokenLoginPath,'utf8'); } catch {}
+    const saved = loadCreds();
+    const keyHash = saved.keyHash || (process.env.LICENSE_KEY ? keyHashFor(process.env.LICENSE_KEY) : undefined);
+    if (savedTok) {
+      try {
+        const res = await sendAndWait({ ...header('login_token'), token: savedTok, keyHash }, 'login_ok');
+        loginTok = res.token; fs.writeFileSync(CONFIG.tokenLoginPath, loginTok);
+        saveCreds({ userId: res.userId, username: res.username, keyHash });
+        console.log('[auth] resumed via saved token');
+        return;
+      } catch {}
+    }
+
+    if (loginTok) return;
+    const msg = { ...header('login'), username: CONFIG.username, password: CONFIG.password, keyHash, deviceInfo:{
       os: os.platform(), arch: os.arch(), appVer: '2.0.0', hwHash: hash(os.cpus().map(c=>c.model).join('|'))
     }};
     const res = await sendAndWait(msg, 'login_ok');
     loginTok = res.token;
     fs.writeFileSync(CONFIG.tokenLoginPath, loginTok);
+    saveCreds({ userId: res.userId, username: res.username, keyHash });
     console.log('Licenses:', res.licenses);
+  }
+
+  
+  async function registerIfNeeded(ws) {
+    if (!process.env.REGISTER) return;
+    const key = process.env.LICENSE_KEY;
+    if (!key) throw new Error('LICENSE_KEY required for register');
+    const keyHash = keyHashFor(key);
+    const msg = { ...header('register'), username: CONFIG.username, password: CONFIG.password, licenseKey: key, keyHash };
+    const res = await sendAndWait(msg, 'login_ok');
+    loginTok = res.token;
+    fs.writeFileSync(CONFIG.tokenLoginPath, loginTok);
+    saveCreds({ userId: res.userId, username: res.username, keyHash });
+    console.log('[register] completed');
   }
 
   async function chooseLicense(ws) {
@@ -306,7 +338,7 @@ async function run() {
     // X25519 ephemeral
     const { privateKey: clientPriv, publicKey: clientPub } = crypto.generateKeyPairSync('x25519');
     const clientPubPem = clientPub.export({ type:'spki', format:'pem' });
-    const bind = { exp: nowMs() + CONFIG.bindWindowMs, watermark: `lic:${process.env.LICENSE_KEY||'LIC-TRIAL-123'}|mac:${CONFIG.machineId}` };
+    const bind = { exp: nowMs() + CONFIG.bindWindowMs, watermark, keyHash: (loadCreds().keyHash || (process.env.LICENSE_KEY ? keyHashFor(process.env.LICENSE_KEY) : undefined)): `lic:${process.env.LICENSE_KEY||'LIC-TRIAL-123'}|mac:${CONFIG.machineId}` };
     const msg = { ...header('get_module'), token: licTok, clientPubX25519Pem: clientPubPem, bind, moduleId };
     const res = await sendAndWait(msg, 'module');
     // verify envelope
@@ -370,12 +402,29 @@ async function run() {
     if (Date.now() > bind.exp) throw new Error('Module expired');
 
 
-    // quick watermark checks
+    // strong watermark checks
     const s = plain.toString('utf8');
-    if (!s.includes('/*watermark:')) throw new Error('Watermark missing');
-    return { bytes: plain }; // first line is comment, rest is .jsc bytes
+    const wm = /\/\*watermark:([^*]+)\*\//.exec(s);
+    const wmSalt = /\/\*wm_salt:([^*]+)\*\//.exec(s);
+    const wmHmac = /\/\*wm_hmac:([^*]+)\*\//.exec(s);
+    if (!wm || !wmSalt || !wmHmac) throw new Error('Watermark fields missing');
+    const keyHash = (loadCreds().keyHash || (process.env.LICENSE_KEY ? hash(process.env.LICENSE_KEY) : ''));
+    const perClientKey = crypto.hkdfSync('sha256', Buffer.from(keyHash,'hex'), Buffer.from('wm:'+bind.watermark), Buffer.from('wm_v1'), 32);
+    const modBody = bytes; // original bytes (unmodified)
+    const expHmac = crypto.createHmac('sha256', perClientKey).update(modBody).update(Buffer.from(wm[1])).digest('base64');
+    if (expHmac !== wmHmac[1]) throw new Error('Watermark HMAC mismatch');
+    return { bytes: plain };
   }
 }
 
 import { pathToFileURL } from 'url';
 run().catch(e=>{ console.error('Client error:', e); process.exit(1); });
+
+  function loadCreds() {
+    try { return JSON.parse(fs.readFileSync(CONFIG.credsPath,'utf8')); } catch { return {}; }
+  }
+  function saveCreds(obj) {
+    const cur = loadCreds();
+    fs.writeFileSync(CONFIG.credsPath, JSON.stringify({ ...cur, ...obj }, null, 2));
+  }
+  function keyHashFor(key) { return hash(String(key||'')); }

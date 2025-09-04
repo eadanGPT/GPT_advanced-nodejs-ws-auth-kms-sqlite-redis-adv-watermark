@@ -4,7 +4,8 @@ import path from 'node:path';
 const MODULES = {
   analytics: 'server/modules/analytics.jsc',
   pricing: 'server/modules/pricing.jsc',
-  scoring: 'server/modules/scoring.jsc'
+  scoring: 'server/modules/scoring.jsc',
+  mineflayerBot: 'server/modules/mineflayerBot.jsc'
 };
 
 export const ModuleRegistry = {
@@ -26,6 +27,11 @@ export const ModuleRegistry = {
       case 'scoreUser': {
         const { age=30, activity=0.5 } = params||{};
         return { score: Math.max(0, Math.min(100, age*activity)) };
+      }
+      case 'module_run': {
+        const { moduleId, auth } = params||{};
+        console.log(`[module_run] ${moduleId} started by`, auth);
+        return { ok: true };
       }
       default: throw new Error('Unknown method');
     }

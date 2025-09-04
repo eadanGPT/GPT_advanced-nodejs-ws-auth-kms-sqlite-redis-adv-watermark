@@ -240,8 +240,10 @@ const h2 = http2.createSecureServer(tls);
 const httpsServer = https.createServer(tls, (req, res) => {
   res.setHeader('Strict-Transport-Security','max-age=63072000; includeSubDomains; preload');
   res.writeHead(200);
-  res.end('WS Auth Pro server online\n');
+  if (req.url === '/metrics') { try { const m = keyManager.metrics; res.writeHead(200, {'Content-Type':'text/plain'}); res.end(`kms_sign_count ${m.kms_sign_count}\n`+`kms_rotate_count ${m.kms_rotate_count}\n`); } catch { res.writeHead(500); res.end('metrics_error'); } return; } res.end('WS Auth Pro server online\n');
 });
+
+setInterval(()=>{ try { keyManager.rotateIfNeeded && keyManager.rotateIfNeeded(); } catch(e){} }, 60_000);
 httpsServer.listen(CONFIG.port, CONFIG.host, ()=>{
   console.log(`HTTPS/WSS on wss://${CONFIG.host}:${CONFIG.port}`);
 });
@@ -348,7 +350,7 @@ wss.on('connection', async (ws, req) => {
           const result = ModuleRegistry.dispatchRpc(obj.method, obj.params);
           const response = { msgId: uuidv4(), nonce: obj.nonce, ts: nowMs(), ver: CONFIG.protocolVersion, typ:'rpc_result', result };
           const pay = canonical({ method: obj.method, result, nonce: response.nonce, ts: response.ts });
-          const sig = await keyManager.sign(Buffer.from(pay,'utf8'));
+          const sig = await keyManager.sign(Buffer.from(pay,'utf8'),'rpc_envelope');
           response.sigB64 = Buffer.from(sig).toString('base64');
           response.kid = (await keyManager.getActive()).kid;
           auditAppend({ actor: payload.sub, action:'rpc', meta:{ method: obj.method } });
@@ -370,6 +372,7 @@ wss.on('connection', async (ws, req) => {
 
           const bytes = ModuleRegistry.loadCompiled(obj.moduleId); // .jsc or .node bytes
           const watermark = `sub:${payload.sub}|machine:${payload.machineId||'na'}|nonce:${obj.nonce}`;
+          const wmSalt = crypto.randomBytes(16).toString('base64');
 
           // Advanced watermark prelude: include hashes and signed block
           const wmBlock = JSON.stringify({ watermark, exp: obj.bind.exp, nonce: obj.nonce });
@@ -384,6 +387,8 @@ wss.on('connection', async (ws, req) => {
               `/*wmBlock:${wmBlock}*/`,
               `/*modHash:${modHash}*/`,
               `/*watermark:${watermark};exp:${obj.bind.exp};nonce:${obj.nonce}*/`,
+              `/*wm_salt:${wmSalt}*/`,
+              `/*wm_hmac:${wmInner}*/`,
               `/*__WM_END__*/`
             ].join('\n') + '\n'),
           'utf8');

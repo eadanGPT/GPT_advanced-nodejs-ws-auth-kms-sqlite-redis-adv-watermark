@@ -75,6 +75,25 @@ CREATE TABLE IF NOT EXISTS revocations (
       db.prepare('UPDATE licenses SET status=? WHERE key=?').run('revoked', key);
     }
 
-    return { checkPassword, listUserLicenses, checkLicenseForUser, isRevoked, revokeLicense, db };
+
+    function createUser(username, password) {
+      const exists = db.prepare('SELECT 1 FROM users WHERE username=?').get(username);
+      if (exists) {
+        const row = db.prepare('SELECT id FROM users WHERE username=?').get(username);
+        return { id: row.id, created: false };
+      }
+      const id = crypto.randomUUID();
+      db.prepare('INSERT INTO users(id,username,pwHash) VALUES(?,?,?)').run(id, username, hashPw(password));
+      return { id, created: true };
+    }
+
+    function claimLicense(key, userId) {
+      const lic = db.prepare('SELECT key FROM licenses WHERE key=?').get(key);
+      if (!lic) throw new Error('Unknown license');
+      db.prepare('UPDATE licenses SET userId=? WHERE key=?').run(userId, key);
+      return true;
+    }
+
+    return { checkPassword, listUserLicenses, checkLicenseForUser, isRevoked, revokeLicense, createUser, claimLicense, db };
   }
 };
